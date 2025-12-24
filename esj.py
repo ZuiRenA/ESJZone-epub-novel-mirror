@@ -13,16 +13,16 @@ import warnings
 # 记得更改参数 t2s是繁体转简体 s2t是简体转繁体
 converter = opencc.OpenCC('t2s.json')
 # 是否为全部下载
-isDownloadAll = True
+isDownloadAll = False
 # 全部下载的列表网址， 也可以类似 https://www.esjzone.cc/tags/R18/ 包含 /tags/?/ 或 /list-??/
 bookListURL = "https://www.esjzone.me/list-01/"
 # 单次下载书籍URL
-bookURL = "https://www.esjzone.me/detail/1624182605.html"
+bookURL = "https://www.esjzone.cc/detail/1764724134.html"
 # 多线程数(esjzone被cloudflare反向代理的。可能有反爬虫机制，不建议调太大)
 threadNum = 4
 # 站点url 可能为 https://www.esjzone.cc/ 或 https://www.esjzone.me/
 # 请确保bookListURL、bookURL、base_url的域名一致，同时esj.txt里cookie为对应的cookie！！！
-base_url = "https://www.esjzone.me/"
+base_url = "https://www.esjzone.cc/"
 
 
 # esjzone 的 cookie请在浏览器中获取，将包含ews_key ews_token的cookie字符串(一行)填在脚本同文件夹下的esj.txt文件第一行
