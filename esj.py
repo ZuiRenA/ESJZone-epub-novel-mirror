@@ -1,5 +1,5 @@
 # coding=utf-8
-import bs4, hashlib, html, opencc, re, requests, sys, threading, uuid, retrying, os, gc, psutil
+import bs4, hashlib, html, opencc, re, requests, sys, threading, uuid, retrying, os, gc, psutil, logging
 from datetime import datetime
 from io import BytesIO
 from os import path, mkdir
@@ -24,6 +24,69 @@ threadNum = 4
 # 请确保bookListURL、bookURL、base_url的域名一致，同时esj.txt里cookie为对应的cookie！！！
 base_url = "https://www.esjzone.cc/"
 
+# 日志系统配置
+current_book_logger = None
+
+def setup_book_logger(book_name, book_author):
+    """为每本书设置独立的日志记录器"""
+    global current_book_logger
+    
+    # 创建logs文件夹
+    if not path.exists("./logs"):
+        mkdir("./logs")
+    
+    # 清理文件名中的非法字符
+    safe_name = re.sub(r'[\\/:*?"<>|]', '', book_name)
+    safe_author = re.sub(r'[\\/:*?"<>|]', '', book_author)
+    
+    # 限制文件名长度
+    if len(safe_name) > 48:
+        safe_name = safe_name[:47] + '…'
+    if len(safe_author) > 16:
+        safe_author = safe_author[:15] + '…'
+    
+    # 创建日志文件名
+    log_filename = f"./logs/《{safe_name}》{safe_author}.log"
+    
+    # 创建logger
+    logger = logging.getLogger(f"{safe_name}_{safe_author}")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    
+    # 文件handler - 只记录到文件，不输出到控制台
+    file_handler = logging.FileHandler(log_filename, mode='a', encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    
+    # 格式化 - 只记录消息内容，不包含时间戳
+    formatter = logging.Formatter('%(message)s')
+    file_handler.setFormatter(formatter)
+    
+    logger.addHandler(file_handler)
+    
+    current_book_logger = logger
+    return logger
+
+def log_message(message, level='info', console_only=False):
+    """记录日志消息
+    Args:
+        message: 日志消息
+        level: 日志级别 ('info', 'warning', 'error')
+        console_only: 如果为True，只输出到控制台不记录到文件
+    """
+    global current_book_logger
+    
+    # 控制台输出
+    print(message)
+    
+    # 文件记录（除非设置为仅控制台）
+    if current_book_logger and not console_only:
+        if level == 'error':
+            current_book_logger.error(message)
+        elif level == 'warning':
+            current_book_logger.warning(message)
+        else:
+            current_book_logger.info(message)
+
 
 # esjzone 的 cookie请在浏览器中获取，将包含ews_key ews_token的cookie字符串(一行)填在脚本同文件夹下的esj.txt文件第一行
 
@@ -40,6 +103,7 @@ class ImgThreadSafeDict(object):
         with self.lock:
             imgByte, imgType, imgHash, imgContentType = getImgData(imgUrl)
             if imgType is None:
+                log_message(f"图片下载失败: {urlHandler(imgUrl)}", 'warning')
                 return f"<p>下载失败：{html.escape(urlHandler(imgUrl))}</p>"
             imgFileName = f"Image_{imgHash}{imgType}"
             if imgFileName not in self.imgFilePathDict:
@@ -80,6 +144,8 @@ class novelCharacterListNode(object):
                 characterSoup = getSoupData(urlHandler(self.url))
                 characterSoupDiv = characterSoup.find("div", {"class": "forum-content mt-3"})
                 if characterSoupDiv is None or self.url is None or len(self.url) == 0:
+                    error_msg = f"章节下载失败: {self.title} - URL: {urlHandler(self.url)}"
+                    log_message(error_msg, 'error')
                     self.txtValue = self.title + "章节下载失败" + "\n" + urlHandler(self.url) + "\n"
                     self.epubValue.title = self.title
                     self.epubValue.content = \
@@ -89,10 +155,12 @@ class novelCharacterListNode(object):
                     self.epubValue.uid = "error_novel" + str(self.value)
                     return
                 if characterSoupDiv.find("button", {"class": "btn btn-primary btn-send-pw"}) is not None:
+                    log_message(f"章节需要密码已跳过: {self.title}", 'warning')
                     self.content = "<p>本章节需要密码，已跳过</p>"
                 else:
                     self.content = htmlSimplified(characterSoup, characterSoupDiv.contents, imgDict)
                 if len(re.sub('\\s', '', self.content)) == 0:
+                    log_message(f"章节内容为空: {self.title}", 'warning')
                     self.content = "<p>【空】</p>"
                 self.txtValue = self.title + "\n" + imgTagConvert(self.content, imgDict)
                 self.epubValue.set_content(self.content)
@@ -112,7 +180,7 @@ isTerminal = True
 
 
 def printProgressBar(iteration, total, prefix='', suffix='', decimals=1, length=20, fill='█', printEnd="\r"):
-    global isTerminal
+    global isTerminal, current_book_logger
     """
     Call in a loop to create terminal progress bar
     @params:
@@ -127,10 +195,18 @@ def printProgressBar(iteration, total, prefix='', suffix='', decimals=1, length=
     """
     if total == 0:
         return
-    if not isTerminal:
-        print(f"==={prefix} {int(iteration * 100 / total)}% {suffix}")
-        return
     percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
+    percent_int = int(iteration * 100 / total)
+    
+    # 记录每个进度到日志文件
+    progress_msg = f"==={prefix} {percent_int}% {suffix}"
+    if current_book_logger:
+        current_book_logger.info(progress_msg)
+    
+    # 终端显示进度条
+    if not isTerminal:
+        print(progress_msg)
+        return
     filledLength = int(length * iteration // total)
     bar = fill * filledLength + '-' * (length - filledLength)
     try:
@@ -138,7 +214,7 @@ def printProgressBar(iteration, total, prefix='', suffix='', decimals=1, length=
     except OSError:
         t = 0
         isTerminal = False
-        print(f"==={prefix} {int(iteration * 100 / total)}% {suffix}")
+        print(progress_msg)
     print("\r" + ' ' * t, end="\r")
     if t >= 36:
         m = t - 36
@@ -174,9 +250,9 @@ def getSoupData(url):
         r.raise_for_status()
         soup = BeautifulSoup(r.content, 'html.parser')
     except HTTPError as e:
-        print("*x*x*x*http错误" + str(e))
+        log_message(f"*x*x*x*http错误{str(e)}", 'error')
     except Exception as e:
-        print("*x*x*x*网络问题，请检测VPN等环境(最好使用TUN模式)" + str(e))
+        log_message(f"*x*x*x*网络问题，请检测VPN等环境(最好使用TUN模式){str(e)}", 'error')
     finally:
         r.close()
         return soup
@@ -204,6 +280,23 @@ def retryGet(u, h, t):
     return requests.get(u, headers=h, timeout=t)
 
 
+def detect_image_type_from_bytes(data):
+    """通过文件头魔数检测图片类型"""
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        return '.png', 'image/png'
+    elif data[:2] == b'\xff\xd8':
+        return '.jpg', 'image/jpeg'
+    elif data[:6] in (b'GIF87a', b'GIF89a'):
+        return '.gif', 'image/gif'
+    elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return '.webp', 'image/webp'
+    elif data[:2] == b'BM':
+        return '.bmp', 'image/bmp'
+    elif data[:4] in (b'II*\x00', b'MM\x00*'):
+        return '.tif', 'image/tiff'
+    return None, None
+
+
 def getImgData(url):
     if url is None or len(url) == 0:
         return None, None, None, None
@@ -220,16 +313,25 @@ def getImgData(url):
         r = retryGet(urlHandler(url), headers_img, (25, 30))
         r.raise_for_status()
     except HTTPError as e:
-        print("*x*x*x*http错误,img下载失败,url=" + url + "\n" + str(e))
+        log_message(f"*x*x*x*http错误,img下载失败,url={url}\n{str(e)}", 'error')
     except Exception as e:
-        print("*x*x*x*网络问题，请检测VPN等环境,url=" + url + "\n" + str(e))
+        log_message(f"*x*x*x*网络问题，请检测VPN等环境,url={url}\n{str(e)}", 'error')
     finally:
         if r.status_code == 200:
             # 返回值 图片比特值 图片后缀 图片hash值 图片Content-Type
             bytes_io = BytesIO(r.content)
             fileName = extension_mapping.get(r.headers.get('Content-Type'), None)
-            resultHash = calculate_sha256_hash(BytesIO(r.content))
             contentType = r.headers.get('Content-Type')
+            
+            # 如果无法从Content-Type获取扩展名，尝试通过文件头魔数检测
+            if fileName is None:
+                detected_ext, detected_type = detect_image_type_from_bytes(r.content)
+                if detected_ext:
+                    fileName = detected_ext
+                    contentType = detected_type
+                    log_message(f"图片类型自动检测: {url} -> {detected_ext}")
+            
+            resultHash = calculate_sha256_hash(BytesIO(r.content))
             r.close()
             return bytes_io, fileName, resultHash, contentType
         else:
@@ -441,11 +543,15 @@ def downloadOneBook(url):
     # 书籍基本信息获取
     soupContent = getSoupData(url)
     if soupContent.find("h2") is None:
-        print("*x*x*x*cookie无效,未登录。也有可能esjzone.cc和esjzone.me的cookie不通用[遇到重定向]")
+        log_message("*x*x*x*cookie无效,未登录。也有可能esjzone.cc和esjzone.me的cookie不通用[遇到重定向]", 'error')
         return None, None, None
     bookName = converter.convert(soupContent.find("h2").text)
     bookAuthorTag = soupContent.find("ul", {"class": "list-unstyled mb-2 book-detail"})
     bookAuthor = converter.convert(bookAuthorTag.find("a").text) if bookAuthorTag and bookAuthorTag.find("a") else ""
+    
+    # 设置该书的日志记录器
+    book_logger = setup_book_logger(bookName, bookAuthor)
+    
     # 替换文件名中不允许的字符
     bookName = re.sub(r'[\\/:*?"<>|]', '', bookName)
     bookAuthor = re.sub(r'[\\/:*?"<>|]', '', bookAuthor)
@@ -471,9 +577,9 @@ def downloadOneBook(url):
         except Exception as e:
             pass
         if existBookLastChangeDate == bookChangeDate and existBookLastChangeDate != '' and bookChangeDate != '':
-            print(f"《{bookName}》{bookAuthor} 更新日期{bookChangeDate} 已存在")
+            log_message(f"《{bookName}》{bookAuthor} 更新日期{bookChangeDate} 已存在")
             return bookName, bookAuthor, bookChangeDate
-    print("-" + bookName + "开始下载\n")
+    log_message(f"-{bookName}开始下载")
     # 封面尝试获取
     if soupContent.find("div", {"class": "product-gallery text-center mb-3"}) is not None:
         coverUrl = urlHandler(
@@ -516,8 +622,22 @@ def downloadOneBook(url):
         thread.join()
     printProgressBar(len(novelCharacterList), len(novelCharacterList), prefix='进度:', suffix="下载完成", length=20)
     # 书籍保存
-    print()
-    print(f"={bookName}章节下载完成")
+    log_message("")
+    
+    # 统计下载情况
+    total_chapters = sum(1 for c in novelCharacterList if c.isChapter)
+    failed_chapters = sum(1 for c in novelCharacterList if c.isChapter and 'error_novel' in c.epubValue.file_name)
+    password_chapters = sum(1 for c in novelCharacterList if c.isChapter and '本章节需要密码' in c.content)
+    empty_chapters = sum(1 for c in novelCharacterList if c.isChapter and '【空】' in c.content)
+    
+    log_message(f"={bookName}章节下载完成")
+    log_message(f"总章节数: {total_chapters}, 下载失败: {failed_chapters}, 需要密码: {password_chapters}, 内容为空: {empty_chapters}")
+    
+    if failed_chapters > 0:
+        log_message("下载失败的章节:", 'error')
+        for character in novelCharacterList:
+            if character.isChapter and 'error_novel' in character.epubValue.file_name:
+                log_message(f"  - {character.title} ({urlHandler(character.url)})", 'error')
     for character in novelCharacterList:
         epubCreateBook.add_item(character.epubValue)
         epubCreateBook.spine.append(character.epubValue)
@@ -539,7 +659,16 @@ def downloadOneBook(url):
     epub.write_epub(f"./epubBooks_esjzone/《{bookName}》{bookAuthor}.epub", epubCreateBook, {})
     with open(f"./txtBooks_esjzone/《{bookName}》{bookAuthor}.txt", "w", encoding="utf-8") as txtFile:
         txtFile.write(txtCreateBook)
-    print(f"《{bookName}》{bookAuthor} 日期{bookChangeDate}下载完成")
+    log_message(f"《{bookName}》{bookAuthor} 日期{bookChangeDate}下载完成")
+    
+    # 清理当前书籍的logger
+    global current_book_logger
+    if current_book_logger:
+        for handler in current_book_logger.handlers[:]:
+            handler.close()
+            current_book_logger.removeHandler(handler)
+        current_book_logger = None
+    
     return bookName, bookAuthor, bookChangeDate
 
 
@@ -670,7 +799,8 @@ if __name__ == "__main__":
         read_me += "\n" + datetime.now().strftime("%Y/%m/%d") + "\n### 本项目更新书籍列表\n"
         bookUrlList = []
         listSoup = getSoupData(bookListURL)
-        print(converter.convert(listSoup.find("h1").text) + "下载中")
+        list_title = converter.convert(listSoup.find("h1").text) if listSoup.find("h1") else "列表"
+        print(list_title + "下载中")
         bookListNum = 0
         scripts = listSoup.find_all('script')
         for script in scripts:
