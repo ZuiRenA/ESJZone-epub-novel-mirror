@@ -1,10 +1,11 @@
-# ESJZone 的简中小说EPUB全部备份
+# ESJZone 的简中小说EPUB下载器
+
 
 从项目 [/ZALin/ESJZone-novel-mirror/](https://github.com/ZALin/ESJZone-novel-mirror/tree/main) 修改而来
 
-包含原项目已经备份小说
+不包含原项目已经备份小说
 
-### 备份说明
+### 下载说明
 1. EPUB格式包含图片(尽可能尝试下载)，超链接文本。并且尝试分析目录。不备份文字css样式。文本格式包含图片源地址。超链接文本
 2. 原项目小说备份位于Novel文件夹下。本项目备份epub小说位于/epubBooks_esjzone。新txt备份位于/txtBooks_esjzone
 3. 不备份备份时间已经已经下架小说，密码页面跳过
@@ -28,10 +29,3 @@
 - 站点url
     - 可能为 `https://www.esjzone.cc/` 或 `https://www.esjzone.me/`。请确保bookListURL、bookURL、base_url的域名一致
 4. 命令行执行`python esj.py`。等待下载完成
-
-### 项目fork时间
-2024/02/03
-### 项目更新时间
-
-2024/02/19
-### 本项目更新书籍列表
