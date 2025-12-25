@@ -17,12 +17,27 @@ isDownloadAll = False
 # 全部下载的列表网址， 也可以类似 https://www.esjzone.cc/tags/R18/ 包含 /tags/?/ 或 /list-??/
 bookListURL = "https://www.esjzone.me/list-01/"
 # 单次下载书籍URL
-bookURL = "https://www.esjzone.cc/detail/1764724134.html"
+bookURL = "https://www.esjzone.cc/detail/1764496071.html"
 # 多线程数(esjzone被cloudflare反向代理的。可能有反爬虫机制，不建议调太大)
 threadNum = 4
 # 站点url 可能为 https://www.esjzone.cc/ 或 https://www.esjzone.me/
 # 请确保bookListURL、bookURL、base_url的域名一致，同时esj.txt里cookie为对应的cookie！！！
 base_url = "https://www.esjzone.cc/"
+
+# ============ 章节选择下载设置 ============
+# 是否只下载指定章节 (设为True启用章节选择模式)
+isSelectChapters = True
+# 是否只列出章节列表(不下载)，用于查看章节编号
+isListChaptersOnly = False
+# 要下载的章节编号列表 (从0开始，只包含章节不包含卷标题)
+# 例如: [0, 1, 2] 下载前3章, [5, 10, 15] 下载第6、11、16章
+# 也可以使用范围: 设置 chapterRangeStart 和 chapterRangeEnd
+selectedChapters = [239]
+# 章节范围下载 (包含起始和结束)，设为-1表示不使用范围模式
+# 例如: chapterRangeStart=0, chapterRangeEnd=9 下载前10章
+chapterRangeStart = -1
+chapterRangeEnd = -1
+# ==========================================
 
 # 日志系统配置
 current_book_logger = None
@@ -532,8 +547,56 @@ def imgTagConvert(inputHtml, imgDict: ImgThreadSafeDict):
     return soup.get_text(separator='\n', strip=True) + "\n"
 
 
+def getSelectedChapterIndices():
+    """根据配置获取要下载的章节索引列表"""
+    if chapterRangeStart >= 0 and chapterRangeEnd >= 0:
+        return list(range(chapterRangeStart, chapterRangeEnd + 1))
+    return selectedChapters
+
+
+def listBookChapters(url):
+    """列出书籍所有章节，用于查看章节编号"""
+    soupContent = getSoupData(url)
+    if soupContent.find("h2") is None:
+        print("*x*x*x*cookie无效,未登录")
+        return
+    bookName = converter.convert(soupContent.find("h2").text)
+    bookAuthorTag = soupContent.find("ul", {"class": "list-unstyled mb-2 book-detail"})
+    bookAuthor = converter.convert(bookAuthorTag.find("a").text) if bookAuthorTag and bookAuthorTag.find("a") else ""
+    
+    print(f"\n《{bookName}》{bookAuthor} 章节列表:")
+    print("=" * 60)
+    
+    novelCharacterList = []
+    chapterList = soupContent.find("div", {"id": "chapterList"})
+    if chapterList is None:
+        print("未找到章节列表")
+        return
+    contentsAnalysis(chapterList.contents, novelCharacterList, 0, -1)
+    
+    # 只显示章节(isChapter=True)，按顺序编号
+    chapterIndex = 0
+    for character in novelCharacterList:
+        if character.isChapter:
+            indent = "  " * character.level
+            print(f"[{chapterIndex:4d}] {indent}{character.title}")
+            chapterIndex += 1
+        elif character.isVolume:
+            indent = "  " * character.level
+            print(f"       {indent}【卷】{character.title}")
+    
+    print("=" * 60)
+    print(f"总章节数: {chapterIndex}")
+    print("\n使用方法:")
+    print("1. 设置 isSelectChapters = True")
+    print("2. 设置 selectedChapters = [0, 1, 2] 下载指定章节")
+    print("   或设置 chapterRangeStart = 0, chapterRangeEnd = 9 下载范围内章节")
+    print("3. 设置 isListChaptersOnly = False")
+    print("4. 重新运行脚本")
+
+
 # 他妈的防御性编程，反反复复爬了一堆然后就报错，一看，哦，页面不规范，缺这个缺那的
-def downloadOneBook(url):
+def downloadOneBook(url, selectChapterMode=False):
     epubCreateBook = epub.EpubBook()
     epubCreateBook.set_identifier(str(uuid.uuid4()))
     epubCreateBook.set_language("zh")
@@ -611,38 +674,85 @@ def downloadOneBook(url):
     if chapterList is None:
         return None, None, None
     depth = contentsAnalysis(chapterList.contents, novelCharacterList, 0, -1)
+    
+    # 章节选择模式：筛选要下载的章节
+    downloadList = novelCharacterList
+    selectedIndices = []
+    if selectChapterMode:
+        selectedIndices = getSelectedChapterIndices()
+        if selectedIndices:
+            # 获取所有章节的索引映射
+            chapterIndexMap = {}  # chapterIndex -> novelCharacterList index
+            chapterIdx = 0
+            for idx, character in enumerate(novelCharacterList):
+                if character.isChapter:
+                    chapterIndexMap[chapterIdx] = idx
+                    chapterIdx += 1
+            
+            # 筛选要下载的章节
+            selectedNodeIndices = set()
+            for selIdx in selectedIndices:
+                if selIdx in chapterIndexMap:
+                    selectedNodeIndices.add(chapterIndexMap[selIdx])
+            
+            # 创建只包含选中章节的下载列表
+            downloadList = [c for idx, c in enumerate(novelCharacterList) 
+                           if idx in selectedNodeIndices or c.isVolume]
+            
+            # 重新编号
+            for newIdx, c in enumerate(downloadList):
+                c.value = newIdx
+            
+            log_message(f"章节选择模式: 选中 {len(selectedIndices)} 个章节")
+    
     # 多线程下载
     threadList = []
     for threadCount in range(0, threadNum):
-        threadList.append(ThreadDownload(threadCount, novelCharacterList, epubImgDict))
+        threadList.append(ThreadDownload(threadCount, downloadList, epubImgDict))
         sleep(0.1)
     for thread in threadList:
         thread.start()
     for thread in threadList:
         thread.join()
-    printProgressBar(len(novelCharacterList), len(novelCharacterList), prefix='进度:', suffix="下载完成", length=20)
+    printProgressBar(len(downloadList), len(downloadList), prefix='进度:', suffix="下载完成", length=20)
     # 书籍保存
     log_message("")
     
     # 统计下载情况
-    total_chapters = sum(1 for c in novelCharacterList if c.isChapter)
-    failed_chapters = sum(1 for c in novelCharacterList if c.isChapter and 'error_novel' in c.epubValue.file_name)
-    password_chapters = sum(1 for c in novelCharacterList if c.isChapter and '本章节需要密码' in c.content)
-    empty_chapters = sum(1 for c in novelCharacterList if c.isChapter and '【空】' in c.content)
+    total_chapters = sum(1 for c in downloadList if c.isChapter)
+    failed_chapters = sum(1 for c in downloadList if c.isChapter and 'error_novel' in c.epubValue.file_name)
+    password_chapters = sum(1 for c in downloadList if c.isChapter and '本章节需要密码' in c.content)
+    empty_chapters = sum(1 for c in downloadList if c.isChapter and '【空】' in c.content)
     
     log_message(f"={bookName}章节下载完成")
     log_message(f"总章节数: {total_chapters}, 下载失败: {failed_chapters}, 需要密码: {password_chapters}, 内容为空: {empty_chapters}")
     
     if failed_chapters > 0:
         log_message("下载失败的章节:", 'error')
-        for character in novelCharacterList:
+        for character in downloadList:
             if character.isChapter and 'error_novel' in character.epubValue.file_name:
                 log_message(f"  - {character.title} ({urlHandler(character.url)})", 'error')
-    for character in novelCharacterList:
+    
+    # 过滤掉空的卷（没有章节内容的卷）
+    finalList = []
+    for character in downloadList:
+        if character.isChapter:
+            finalList.append(character)
+        elif character.isVolume:
+            # 检查这个卷下面是否有章节被下载
+            hasContent = False
+            for c in downloadList:
+                if c.isChapter and c.fatherValue == character.value:
+                    hasContent = True
+                    break
+            if hasContent or not selectChapterMode:
+                finalList.append(character)
+    
+    for character in finalList:
         epubCreateBook.add_item(character.epubValue)
         epubCreateBook.spine.append(character.epubValue)
         txtCreateBook += character.txtValue
-    epubCreateBook.toc.extend(listAnalysisToc(novelCharacterList, depth))
+    epubCreateBook.toc.extend(listAnalysisToc(finalList, depth))
     for pic in epubImgDict.imgFilePathDict:
         epubCreateBook.add_item(
             epub.EpubImage(uid=str(pic), file_name=epubImgDict.imgFilePathDict[pic],
@@ -656,10 +766,21 @@ def downloadOneBook(url):
     if not path.exists("./txtBooks_esjzone"):
         mkdir("./txtBooks_esjzone")
     
-    epub.write_epub(f"./epubBooks_esjzone/《{bookName}》{bookAuthor}.epub", epubCreateBook, {})
-    with open(f"./txtBooks_esjzone/《{bookName}》{bookAuthor}.txt", "w", encoding="utf-8") as txtFile:
+    # 章节选择模式下使用不同的文件名
+    if selectChapterMode and selectedIndices:
+        chapterRangeStr = f"_章节{min(selectedIndices)}-{max(selectedIndices)}"
+        epubFileName = f"./epubBooks_esjzone/《{bookName}》{bookAuthor}{chapterRangeStr}.epub"
+        txtFileName = f"./txtBooks_esjzone/《{bookName}》{bookAuthor}{chapterRangeStr}.txt"
+    else:
+        epubFileName = f"./epubBooks_esjzone/《{bookName}》{bookAuthor}.epub"
+        txtFileName = f"./txtBooks_esjzone/《{bookName}》{bookAuthor}.txt"
+    
+    epub.write_epub(epubFileName, epubCreateBook, {})
+    with open(txtFileName, "w", encoding="utf-8") as txtFile:
         txtFile.write(txtCreateBook)
     log_message(f"《{bookName}》{bookAuthor} 日期{bookChangeDate}下载完成")
+    log_message(f"EPUB保存至: {epubFileName}")
+    log_message(f"TXT保存至: {txtFileName}")
     
     # 清理当前书籍的logger
     global current_book_logger
@@ -836,4 +957,18 @@ if __name__ == "__main__":
         with open("./README.md", "w", encoding="utf-8") as readmeFile:
             readmeFile.write(read_me)
     else:
-        downloadOneBook(bookURL)
+        # 章节列表模式：只列出章节不下载
+        if isListChaptersOnly:
+            listBookChapters(bookURL)
+        # 章节选择模式：下载指定章节
+        elif isSelectChapters:
+            selectedIndices = getSelectedChapterIndices()
+            if not selectedIndices:
+                print("错误：章节选择模式已启用，但未指定要下载的章节")
+                print("请设置 selectedChapters 列表 或 chapterRangeStart/chapterRangeEnd")
+                print("提示：先设置 isListChaptersOnly = True 查看章节列表")
+                sys.exit(3)
+            downloadOneBook(bookURL, selectChapterMode=True)
+        # 普通模式：下载全部章节
+        else:
+            downloadOneBook(bookURL)
