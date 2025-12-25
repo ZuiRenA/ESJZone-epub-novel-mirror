@@ -32,11 +32,14 @@ isListChaptersOnly = False
 # 要下载的章节编号列表 (从0开始，只包含章节不包含卷标题)
 # 例如: [0, 1, 2] 下载前3章, [5, 10, 15] 下载第6、11、16章
 # 也可以使用范围: 设置 chapterRangeStart 和 chapterRangeEnd
-selectedChapters = [239]
+selectedChapters = [161]
 # 章节范围下载 (包含起始和结束)，设为-1表示不使用范围模式
 # 例如: chapterRangeStart=0, chapterRangeEnd=9 下载前10章
 chapterRangeStart = -1
 chapterRangeEnd = -1
+# 是否将下载的章节合并到已有的epub/txt文件中
+# 设为True时，会自动查找已有文件并按章节顺序插入新下载的章节
+isMergeToExisting = True
 # ==========================================
 
 # 日志系统配置
@@ -591,9 +594,258 @@ def listBookChapters(url):
     print("1. 设置 isSelectChapters = True")
     print("2. 设置 selectedChapters = [0, 1, 2] 下载指定章节")
     print("   或设置 chapterRangeStart = 0, chapterRangeEnd = 9 下载范围内章节")
-    print("3. 设置 isListChaptersOnly = False")
-    print("4. 重新运行脚本")
+    print("3. 设置 isMergeToExisting = True 合并到已有文件（可选）")
+    print("4. 设置 isListChaptersOnly = False")
+    print("5. 重新运行脚本")
 
+
+
+def mergeChaptersToExisting(bookName, bookAuthor, newChapters, newImgDict, selectedIndices):
+    """将新下载的章节合并到已有的epub和txt文件中
+    
+    策略：读取原EPUB，按索引顺序替换/插入章节，保留原有结构
+    """
+    epubPath = f"./epubBooks_esjzone/《{bookName}》{bookAuthor}.epub"
+    txtPath = f"./txtBooks_esjzone/《{bookName}》{bookAuthor}.txt"
+    
+    epubMerged = False
+    txtMerged = False
+    
+    # 合并EPUB
+    if path.exists(epubPath):
+        try:
+            log_message(f"正在合并章节到EPUB: {epubPath}")
+            
+            import shutil
+            
+            # 读取原EPUB
+            existingBook = epub.read_epub(epubPath, {'ignore_ncx': True})
+            
+            # 从TOC中提取章节标题映射
+            chapterTitles = {}  # file_name -> title
+            otherTitles = {}  # file_name -> title
+            for tocItem in existingBook.toc:
+                if hasattr(tocItem, 'href') and hasattr(tocItem, 'title'):
+                    href = tocItem.href.split('#')[0]  # 移除锚点
+                    if tocItem.title:
+                        if 'novel_' in href:
+                            chapterTitles[href] = tocItem.title
+                        else:
+                            otherTitles[href] = tocItem.title
+            
+            # 获取所有现有章节及其索引
+            existingChapters = {}  # idx -> dict
+            otherHtmlItems = []  # 非章节HTML项目（封面、简介等）
+            imageItems = {}  # 图片项目，用于去重
+            coverImageItem = None  # 封面图片
+            
+            for item in existingBook.get_items():
+                fileName = getattr(item, 'file_name', '') or ''
+                
+                # 检查是否是封面图片
+                if isinstance(item, epub.EpubCover):
+                    coverImageItem = item
+                    continue
+                
+                # 检查是否是章节文件
+                match = re.search(r'novel_(\d+)\.html', fileName)
+                if match:
+                    chapterIdx = int(match.group(1))
+                    content = item.content
+                    if content and (isinstance(content, bytes) and content.strip() or isinstance(content, str) and content.strip()):
+                        if isinstance(content, str):
+                            content = content.encode('utf-8')
+                        # 优先从TOC获取标题
+                        title = chapterTitles.get(fileName, '') or getattr(item, 'title', '') or f'Chapter {chapterIdx}'
+                        existingChapters[chapterIdx] = {
+                            'content': content,
+                            'title': title
+                        }
+                elif isinstance(item, epub.EpubImage):
+                    imageItems[fileName] = item
+                elif isinstance(item, (epub.EpubNcx, epub.EpubNav)):
+                    pass
+                elif fileName in ['nav.xhtml', 'toc.ncx', 'cover.xhtml']:
+                    pass  # 跳过导航文件和cover.xhtml（set_cover会自动生成）
+                elif fileName.endswith('.html') or fileName.endswith('.xhtml'):
+                    content = item.content
+                    if content and (isinstance(content, bytes) and content.strip() or isinstance(content, str) and content.strip()):
+                        if isinstance(content, str):
+                            content = content.encode('utf-8')
+                        # 优先从TOC获取标题
+                        title = otherTitles.get(fileName, '') or getattr(item, 'title', '') or ''
+                        otherHtmlItems.append({
+                            'file_name': fileName,
+                            'content': content,
+                            'title': title,
+                            'uid': getattr(item, 'id', fileName)
+                        })
+                elif fileName:
+                    pass  # 其他文件暂不处理
+            
+            log_message(f"  从原文件读取了 {len(existingChapters)} 个章节")
+            
+            # 更新/添加新章节
+            updatedCount = 0
+            addedCount = 0
+            for chapterIdx, chapter in newChapters:
+                if chapter.isChapter:
+                    content = chapter.epubValue.content
+                    if content is None or (isinstance(content, str) and not content.strip()) or (isinstance(content, bytes) and not content.strip()):
+                        content = f"<html><head></head><body><h1>{chapter.title}</h1><p>内容为空</p></body></html>".encode('utf-8')
+                    
+                    # 确保内容是bytes类型
+                    if isinstance(content, str):
+                        content = content.encode('utf-8')
+                    
+                    if chapterIdx in existingChapters:
+                        log_message(f"  替换章节 [{chapterIdx}]: {chapter.title}")
+                        updatedCount += 1
+                    else:
+                        log_message(f"  添加章节 [{chapterIdx}]: {chapter.title}")
+                        addedCount += 1
+                    
+                    existingChapters[chapterIdx] = {
+                        'content': content,  # bytes类型
+                        'title': chapter.title
+                    }
+            
+            # 添加新图片（跳过已存在的）
+            newImageCount = 0
+            for picName in newImgDict.imgFilePathDict:
+                try:
+                    imgFileName = newImgDict.imgFilePathDict[picName]
+                    if imgFileName not in imageItems:
+                        newImg = epub.EpubImage(
+                            uid=str(picName),
+                            file_name=imgFileName,
+                            media_type=newImgDict.imgContentTypeDict[picName],
+                            content=newImgDict.imgByteDict[picName].getvalue()
+                        )
+                        imageItems[imgFileName] = newImg
+                        newImageCount += 1
+                except:
+                    pass
+            
+            if newImageCount > 0:
+                log_message(f"  添加了 {newImageCount} 张新图片")
+            
+            # 创建新的EPUB
+            newBook = epub.EpubBook()
+            
+            # 复制元数据
+            newBook.set_identifier(existingBook.get_metadata('DC', 'identifier')[0][0] if existingBook.get_metadata('DC', 'identifier') else str(uuid.uuid4()))
+            newBook.set_title(bookName)
+            newBook.set_language("zh")
+            newBook.add_author(bookAuthor)
+            
+            # 复制自定义元数据
+            try:
+                for meta in existingBook.get_metadata('OPF', 'esjLastChangeDate'):
+                    newBook.add_metadata(None, 'meta', '', {'name': 'esjLastChangeDate', 'content': meta[1].get('content', '')})
+            except:
+                pass
+            
+            # 复制封面图片
+            if coverImageItem:
+                newBook.set_cover(coverImageItem.file_name, coverImageItem.content)
+            
+            # 添加其他非章节HTML项目（封面HTML、简介等），使用Link保留标题
+            for itemData in otherHtmlItems:
+                htmlItem = epub.EpubHtml(
+                    uid=itemData['uid'],
+                    file_name=itemData['file_name'],
+                    title=itemData['title'],
+                    lang="zh"
+                )
+                htmlItem.content = itemData['content']
+                newBook.add_item(htmlItem)
+                newBook.spine.append(htmlItem)
+                # 使用Link对象保留标题
+                newBook.toc.append(epub.Link(itemData['file_name'], itemData['title'], itemData['uid']))
+            
+            # 按索引顺序添加所有章节
+            sortedChapterIndices = sorted(existingChapters.keys())
+            chapterToc = []
+            for idx in sortedChapterIndices:
+                chapterData = existingChapters[idx]
+                content = chapterData['content']  # 已经是bytes类型
+                title = chapterData.get('title', f'Chapter {idx}')
+                
+                # 确保内容有效（bytes类型）
+                if not content or not content.strip():
+                    content = f"<html><head></head><body><h1>{title}</h1><p>内容为空</p></body></html>".encode('utf-8')
+                
+                chapterHtml = epub.EpubHtml(
+                    uid=f"novel{idx}",
+                    file_name=f"novel_{idx}.html",
+                    title=title,
+                    lang="zh"
+                )
+                chapterHtml.content = content  # bytes类型
+                
+                newBook.add_item(chapterHtml)
+                newBook.spine.append(chapterHtml)
+                # 使用Link对象保留章节标题
+                chapterToc.append(epub.Link(f"novel_{idx}.html", title, f"novel{idx}"))
+            
+            # 添加章节到目录
+            newBook.toc.extend(chapterToc)
+            
+            # 添加所有图片
+            for imgFileName, imgItem in imageItems.items():
+                newBook.add_item(imgItem)
+            
+            # 添加导航
+            newBook.add_item(epub.EpubNcx())
+            newBook.add_item(epub.EpubNav())
+            
+            # 备份原文件
+            backupPath = epubPath.replace('.epub', '_backup.epub')
+            shutil.copy2(epubPath, backupPath)
+            log_message(f"  原文件已备份至: {backupPath}")
+            
+            # 保存新EPUB
+            epub.write_epub(epubPath, newBook, {})
+            log_message(f"EPUB合并完成: 替换 {updatedCount} 个章节, 新增 {addedCount} 个章节, 总计 {len(existingChapters)} 个章节")
+            epubMerged = True
+            
+        except Exception as e:
+            import traceback
+            log_message(f"EPUB合并失败: {str(e)}", 'error')
+            log_message(f"详细错误: {traceback.format_exc()}", 'error')
+    else:
+        log_message(f"未找到已有EPUB文件: {epubPath}", 'warning')
+    
+    # 合并TXT
+    if path.exists(txtPath):
+        try:
+            log_message(f"正在合并章节到TXT: {txtPath}")
+            
+            newChapterContents = {}
+            for chapterIdx, chapter in newChapters:
+                if chapter.isChapter:
+                    newChapterContents[chapterIdx] = chapter.txtValue
+
+            # 直接追加章节内容，不添加额外标记
+            appendContent = "\n"
+            for chapterIdx in sorted(newChapterContents.keys()):
+                appendContent += newChapterContents[chapterIdx]
+            
+            with open(txtPath, "a", encoding="utf-8") as f:
+                f.write(appendContent)
+            
+            log_message(f"TXT合并完成，追加了 {len(newChapterContents)} 个章节")
+            txtMerged = True
+            
+        except Exception as e:
+            log_message(f"TXT合并失败: {str(e)}", 'error')
+    else:
+        log_message(f"未找到已有TXT文件: {txtPath}", 'warning')
+    
+    if epubMerged or txtMerged:
+        return epubPath, txtPath
+    return None, None
 
 # 他妈的防御性编程，反反复复爬了一堆然后就报错，一看，哦，页面不规范，缺这个缺那的
 def downloadOneBook(url, selectChapterMode=False):
@@ -678,26 +930,34 @@ def downloadOneBook(url, selectChapterMode=False):
     # 章节选择模式：筛选要下载的章节
     downloadList = novelCharacterList
     selectedIndices = []
+    chapterIndexMap = {}  # chapterIndex -> novelCharacterList index
+    reverseChapterMap = {}  # novelCharacterList index -> chapterIndex
+    
+    # 先建立章节索引映射
+    chapterIdx = 0
+    for idx, character in enumerate(novelCharacterList):
+        if character.isChapter:
+            chapterIndexMap[chapterIdx] = idx
+            reverseChapterMap[idx] = chapterIdx
+            chapterIdx += 1
+    
     if selectChapterMode:
         selectedIndices = getSelectedChapterIndices()
         if selectedIndices:
-            # 获取所有章节的索引映射
-            chapterIndexMap = {}  # chapterIndex -> novelCharacterList index
-            chapterIdx = 0
-            for idx, character in enumerate(novelCharacterList):
-                if character.isChapter:
-                    chapterIndexMap[chapterIdx] = idx
-                    chapterIdx += 1
-            
             # 筛选要下载的章节
             selectedNodeIndices = set()
             for selIdx in selectedIndices:
                 if selIdx in chapterIndexMap:
                     selectedNodeIndices.add(chapterIndexMap[selIdx])
             
-            # 创建只包含选中章节的下载列表
-            downloadList = [c for idx, c in enumerate(novelCharacterList) 
-                           if idx in selectedNodeIndices or c.isVolume]
+            # 创建只包含选中章节的下载列表，保留原始索引信息
+            downloadList = []
+            for idx, c in enumerate(novelCharacterList):
+                if idx in selectedNodeIndices:
+                    c.originalChapterIndex = reverseChapterMap.get(idx, -1)
+                    downloadList.append(c)
+                elif c.isVolume:
+                    downloadList.append(c)
             
             # 重新编号
             for newIdx, c in enumerate(downloadList):
@@ -766,21 +1026,47 @@ def downloadOneBook(url, selectChapterMode=False):
     if not path.exists("./txtBooks_esjzone"):
         mkdir("./txtBooks_esjzone")
     
-    # 章节选择模式下使用不同的文件名
-    if selectChapterMode and selectedIndices:
-        chapterRangeStr = f"_章节{min(selectedIndices)}-{max(selectedIndices)}"
-        epubFileName = f"./epubBooks_esjzone/《{bookName}》{bookAuthor}{chapterRangeStr}.epub"
-        txtFileName = f"./txtBooks_esjzone/《{bookName}》{bookAuthor}{chapterRangeStr}.txt"
+    # 章节选择模式且开启合并功能
+    if selectChapterMode and selectedIndices and isMergeToExisting:
+        # 准备合并数据：(原始章节索引, 章节节点)
+        chaptersToMerge = []
+        for character in finalList:
+            if character.isChapter and hasattr(character, 'originalChapterIndex'):
+                chaptersToMerge.append((character.originalChapterIndex, character))
+        
+        # 执行合并
+        mergedEpub, mergedTxt = mergeChaptersToExisting(
+            bookName, bookAuthor, chaptersToMerge, epubImgDict, selectedIndices)
+        
+        if mergedEpub or mergedTxt:
+            log_message(f"《{bookName}》{bookAuthor} 章节合并完成")
+        else:
+            # 合并失败，保存为独立文件
+            log_message("合并失败，将保存为独立文件", 'warning')
+            chapterRangeStr = f"_章节{min(selectedIndices)}-{max(selectedIndices)}"
+            epubFileName = f"./epubBooks_esjzone/《{bookName}》{bookAuthor}{chapterRangeStr}.epub"
+            txtFileName = f"./txtBooks_esjzone/《{bookName}》{bookAuthor}{chapterRangeStr}.txt"
+            epub.write_epub(epubFileName, epubCreateBook, {})
+            with open(txtFileName, "w", encoding="utf-8") as txtFile:
+                txtFile.write(txtCreateBook)
+            log_message(f"EPUB保存至: {epubFileName}")
+            log_message(f"TXT保存至: {txtFileName}")
     else:
-        epubFileName = f"./epubBooks_esjzone/《{bookName}》{bookAuthor}.epub"
-        txtFileName = f"./txtBooks_esjzone/《{bookName}》{bookAuthor}.txt"
-    
-    epub.write_epub(epubFileName, epubCreateBook, {})
-    with open(txtFileName, "w", encoding="utf-8") as txtFile:
-        txtFile.write(txtCreateBook)
-    log_message(f"《{bookName}》{bookAuthor} 日期{bookChangeDate}下载完成")
-    log_message(f"EPUB保存至: {epubFileName}")
-    log_message(f"TXT保存至: {txtFileName}")
+        # 章节选择模式下使用不同的文件名
+        if selectChapterMode and selectedIndices:
+            chapterRangeStr = f"_章节{min(selectedIndices)}-{max(selectedIndices)}"
+            epubFileName = f"./epubBooks_esjzone/《{bookName}》{bookAuthor}{chapterRangeStr}.epub"
+            txtFileName = f"./txtBooks_esjzone/《{bookName}》{bookAuthor}{chapterRangeStr}.txt"
+        else:
+            epubFileName = f"./epubBooks_esjzone/《{bookName}》{bookAuthor}.epub"
+            txtFileName = f"./txtBooks_esjzone/《{bookName}》{bookAuthor}.txt"
+        
+        epub.write_epub(epubFileName, epubCreateBook, {})
+        with open(txtFileName, "w", encoding="utf-8") as txtFile:
+            txtFile.write(txtCreateBook)
+        log_message(f"《{bookName}》{bookAuthor} 日期{bookChangeDate}下载完成")
+        log_message(f"EPUB保存至: {epubFileName}")
+        log_message(f"TXT保存至: {txtFileName}")
     
     # 清理当前书籍的logger
     global current_book_logger
