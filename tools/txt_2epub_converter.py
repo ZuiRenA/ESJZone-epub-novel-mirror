@@ -13,11 +13,14 @@ import os
 import re
 import requests
 import imghdr
+import time
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 from ebooklib import epub
 from PIL import Image
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 
 class TxtToEpubConverter:
@@ -32,7 +35,10 @@ class TxtToEpubConverter:
             'author_pattern': r'^作者[：:]\s*(.+)$',  # 作者提取正则
             'chapter_pattern': r'^第[0-9零一二三四五六七八九十百千万]+[章节回]',  # 章节标题正则
             'image_pattern': r'https?://[^\s<>"{}|\\^`\[\]]+\.(?:jpg|jpeg|png|gif|webp)',  # 图片链接正则
-            'headers': {'User-Agent': 'Mozilla/5.0'}  # 请求头
+            'headers': {'User-Agent': 'Mozilla/5.0'},  # 请求头
+            'max_workers': 3,  # 最大线程数，用于图片下载
+            'retry_times': 3,  # 图片下载失败重试次数
+            'retry_delay': 2  # 重试等待时间（秒）
         }
         """
         self.input_dir = config.get('input_dir', 'txtBooks_esjzone')
@@ -43,42 +49,68 @@ class TxtToEpubConverter:
         self.chapter_pattern = config.get('chapter_pattern', r'^第[0-9零一二三四五六七八九十百千万]+[章节回]')
         self.image_pattern = config.get('image_pattern', r'https?://[^\s<>"{}|\\^`\[\]]+')
         self.headers = config.get('headers', {'User-Agent': 'Mozilla/5.0'})
+        self.max_workers = config.get('max_workers', 3)
+        self.retry_times = config.get('retry_times', 3)
+        self.retry_delay = config.get('retry_delay', 2)
+        
+        # 用于线程安全的打印
+        self.print_lock = threading.Lock()
         
         os.makedirs(self.output_dir, exist_ok=True)
+    
+    def thread_safe_print(self, message: str):
+        """线程安全的打印"""
+        with self.print_lock:
+            print(message)
 
     def download_image(self, url: str, is_cover: bool = False) -> Optional[Tuple[bytes, str]]:
         """
-        下载图片并识别格式
+        下载图片并识别格式，支持重试
         返回: (图片二进制数据, 扩展名) 或 None
         """
-        try:
-            prefix = "🎨" if is_cover else "  ⬇️ "
-            print(f"{prefix} 下载图片: {url}")
-            response = requests.get(url, headers=self.headers, timeout=15)
-            response.raise_for_status()
-            img_data = response.content
-            
-            # 使用魔数识别图片类型
-            img_type = imghdr.what(None, h=img_data)
-            if img_type:
-                print(f"  ✓ 识别图片格式: {img_type} ({len(img_data)} bytes)")
-                return img_data, img_type
-            
-            # 尝试用PIL打开并转换
+        prefix = "🎨" if is_cover else "  ⬇️ "
+        
+        for attempt in range(1, self.retry_times + 1):
             try:
-                print(f"  🔄 使用PIL识别图片格式...")
-                img = Image.open(BytesIO(img_data))
-                output = BytesIO()
-                img_format = img.format.lower() if img.format else 'jpeg'
-                img.save(output, format=img_format)
-                print(f"  ✓ 转换图片格式: {img_format} ({len(output.getvalue())} bytes)")
-                return output.getvalue(), img_format
-            except:
-                print(f"  ✗ 无法识别图片格式")
-                return None
-        except Exception as e:
-            print(f"  ✗ 下载图片失败 {url[:60]}...: {e}")
-            return None
+                if attempt == 1:
+                    self.thread_safe_print(f"{prefix} 下载图片: {url[:60]}...")
+                else:
+                    self.thread_safe_print(f"  🔄 重试 {attempt}/{self.retry_times}: {url[:60]}...")
+                
+                response = requests.get(url, headers=self.headers, timeout=15)
+                response.raise_for_status()
+                img_data = response.content
+                
+                # 使用魔数识别图片类型
+                img_type = imghdr.what(None, h=img_data)
+                if img_type:
+                    self.thread_safe_print(f"  ✓ 识别图片格式: {img_type} ({len(img_data)} bytes)")
+                    return img_data, img_type
+                
+                # 尝试用PIL打开并转换
+                try:
+                    self.thread_safe_print(f"  🔄 使用PIL识别图片格式...")
+                    img = Image.open(BytesIO(img_data))
+                    output = BytesIO()
+                    img_format = img.format.lower() if img.format else 'jpeg'
+                    img.save(output, format=img_format)
+                    self.thread_safe_print(f"  ✓ 转换图片格式: {img_format} ({len(output.getvalue())} bytes)")
+                    return output.getvalue(), img_format
+                except:
+                    self.thread_safe_print(f"  ✗ 无法识别图片格式")
+                    if attempt < self.retry_times:
+                        time.sleep(self.retry_delay)
+                    continue
+                    
+            except Exception as e:
+                if attempt < self.retry_times:
+                    self.thread_safe_print(f"  ⚠️  下载失败: {e}")
+                    self.thread_safe_print(f"  ⏳ 等待 {self.retry_delay} 秒后重试...")
+                    time.sleep(self.retry_delay)
+                else:
+                    self.thread_safe_print(f"  ✗ 下载图片最终失败 {url[:60]}...: {e}")
+        
+        return None
 
     def load_cover_image(self, cover_source: str) -> Optional[Tuple[bytes, str]]:
         """
@@ -183,32 +215,54 @@ class TxtToEpubConverter:
     def process_images_in_content(self, content: str, book: epub.EpubBook, chapter_id: str) -> str:
         """
         处理内容中的图片链接，下载并添加到epub中
+        使用多线程并发下载图片
         """
         image_urls = re.findall(self.image_pattern, content)
         
-        if image_urls:
-            print(f"  🖼️  发现 {len(image_urls)} 张图片")
+        if not image_urls:
+            return content
         
-        for idx, url in enumerate(image_urls):
-            result = self.download_image(url)
-            if result:
-                img_data, img_type = result
-                img_name = f'{chapter_id}_img_{idx}.{img_type}'
-                
-                # 添加图片到epub
-                epub_img = epub.EpubItem(
-                    uid=f'img_{chapter_id}_{idx}',
-                    file_name=f'images/{img_name}',
-                    media_type=f'image/{img_type}',
-                    content=img_data
-                )
-                book.add_item(epub_img)
-                print(f"  ✓ 添加图片到EPUB: {img_name}")
-                
-                # 替换文本中的链接为img标签
-                img_tag = f'<img src="images/{img_name}" alt="image" />'
-                content = content.replace(url, img_tag)
+        print(f"  🖼️  发现 {len(image_urls)} 张图片，开始并发下载...")
         
+        # 使用多线程下载图片
+        downloaded_images = {}
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # 提交所有下载任务
+            future_to_url = {
+                executor.submit(self.download_image, url): (idx, url) 
+                for idx, url in enumerate(image_urls)
+            }
+            
+            # 收集结果
+            for future in as_completed(future_to_url):
+                idx, url = future_to_url[future]
+                try:
+                    result = future.result()
+                    if result:
+                        downloaded_images[idx] = (url, result)
+                except Exception as e:
+                    self.thread_safe_print(f"  ✗ 图片下载异常 {url[:60]}...: {e}")
+        
+        # 按顺序添加图片到epub并替换文本
+        for idx in sorted(downloaded_images.keys()):
+            url, (img_data, img_type) = downloaded_images[idx]
+            img_name = f'{chapter_id}_img_{idx}.{img_type}'
+            
+            # 添加图片到epub
+            epub_img = epub.EpubItem(
+                uid=f'img_{chapter_id}_{idx}',
+                file_name=f'images/{img_name}',
+                media_type=f'image/{img_type}',
+                content=img_data
+            )
+            book.add_item(epub_img)
+            self.thread_safe_print(f"  ✓ 添加图片到EPUB: {img_name}")
+            
+            # 替换文本中的链接为img标签
+            img_tag = f'<img src="images/{img_name}" alt="image" />'
+            content = content.replace(url, img_tag)
+        
+        print(f"  ✅ 图片处理完成: {len(downloaded_images)}/{len(image_urls)} 成功")
         return content
 
     def create_epub(self, book_info: Dict, output_path: str):
@@ -367,9 +421,12 @@ if __name__ == '__main__':
         'author_pattern': r'^作者[：:]\s*(.+)$',
         'chapter_pattern': r'^第[0-9零一二三四五六七八九十百千万]+[章节回]',
         'image_pattern': r'https?://[^\s<>"{}|\\^`\[\]]+\.(?:jpg|jpeg|png|gif|webp|bmp|file)',
-        'headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        'headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0'},
+        'max_workers': 3,  # 图片下载线程数，根据网络情况调整，建议3-10
+        'retry_times': 3,  # 图片下载失败重试次数，建议2-5
+        'retry_delay': 2   # 重试等待时间（秒），建议1-5
     }
     
     converter = TxtToEpubConverter(config)
-    # converter.convert_all()  # 转换所有txt文件
-    converter.convert('败北成瘾的M系魔法少女_20251226104405.txt')  # 转换单个文件
+    converter.convert_all()  # 转换所有txt文件
+    # converter.convert('example.txt')  # 转换单个文件
