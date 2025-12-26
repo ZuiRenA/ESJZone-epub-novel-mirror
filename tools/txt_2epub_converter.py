@@ -420,7 +420,7 @@ if __name__ == '__main__':
         'title_pattern': r'^书名[：:]\s*(.+)$',
         'author_pattern': r'^作者[：:]\s*(.+)$',
         'chapter_pattern': r'^第[0-9零一二三四五六七八九十百千万]+[章节回]',
-        'image_pattern': r'https?://[^\s<>"{}|\\^`\[\]]+\.(?:jpg|jpeg|png|gif|webp|bmp|file)',
+        'image_pattern': r'\[(?:image|图片)\s*:\s*(https?://[^\s<>"{}|\\^`\[\]]+\.(?:jpg|jpeg|png|gif|webp|bmp|file))\]',
         'headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0'},
         'max_workers': 3,  # 图片下载线程数，根据网络情况调整，建议3-10
         'retry_times': 3,  # 图片下载失败重试次数，建议2-5
