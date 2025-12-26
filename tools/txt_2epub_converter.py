@@ -217,35 +217,53 @@ class TxtToEpubConverter:
         处理内容中的图片链接，下载并添加到epub中
         使用多线程并发下载图片
         """
-        image_urls = re.findall(self.image_pattern, content)
+        # 使用正则查找所有匹配项（包含完整匹配的文本）
+        image_matches = list(re.finditer(self.image_pattern, content))
         
-        if not image_urls:
+        if not image_matches:
             return content
         
-        print(f"  🖼️  发现 {len(image_urls)} 张图片，开始并发下载...")
+        print(f"  🖼️  发现 {len(image_matches)} 张图片，开始并发下载...")
+        
+        # 提取URL（可能在匹配文本中）
+        image_data_list = []
+        for idx, match in enumerate(image_matches):
+            matched_text = match.group(0)  # 完整匹配的文本
+            # 从匹配文本中提取URL（查找http/https开头的链接）
+            url_match = re.search(r'https?://[^\s<>"{}|\\^`\[\]]+', matched_text)
+            if url_match:
+                url = url_match.group(0)
+                image_data_list.append({
+                    'idx': idx,
+                    'matched_text': matched_text,  # 原始匹配文本（用于替换）
+                    'url': url,  # 提取的URL（用于下载）
+                    'start': match.start(),
+                    'end': match.end()
+                })
         
         # 使用多线程下载图片
         downloaded_images = {}
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             # 提交所有下载任务
-            future_to_url = {
-                executor.submit(self.download_image, url): (idx, url) 
-                for idx, url in enumerate(image_urls)
+            future_to_idx = {
+                executor.submit(self.download_image, img_data['url']): img_data
+                for img_data in image_data_list
             }
             
             # 收集结果
-            for future in as_completed(future_to_url):
-                idx, url = future_to_url[future]
+            for future in as_completed(future_to_idx):
+                img_data = future_to_idx[future]
                 try:
                     result = future.result()
                     if result:
-                        downloaded_images[idx] = (url, result)
+                        downloaded_images[img_data['idx']] = (img_data, result)
                 except Exception as e:
-                    self.thread_safe_print(f"  ✗ 图片下载异常 {url[:60]}...: {e}")
+                    self.thread_safe_print(f"  ✗ 图片下载异常 {img_data['url'][:60]}...: {e}")
         
-        # 按顺序添加图片到epub并替换文本
+        # 按索引倒序替换（避免位置偏移）
+        replacements = []
         for idx in sorted(downloaded_images.keys()):
-            url, (img_data, img_type) = downloaded_images[idx]
+            img_data, (img_bytes, img_type) = downloaded_images[idx]
             img_name = f'{chapter_id}_img_{idx}.{img_type}'
             
             # 添加图片到epub
@@ -253,16 +271,23 @@ class TxtToEpubConverter:
                 uid=f'img_{chapter_id}_{idx}',
                 file_name=f'images/{img_name}',
                 media_type=f'image/{img_type}',
-                content=img_data
+                content=img_bytes
             )
             book.add_item(epub_img)
             self.thread_safe_print(f"  ✓ 添加图片到EPUB: {img_name}")
             
-            # 替换文本中的链接为img标签
+            # 记录替换信息
             img_tag = f'<img src="images/{img_name}" alt="image" />'
-            content = content.replace(url, img_tag)
+            replacements.append({
+                'matched_text': img_data['matched_text'],
+                'img_tag': img_tag
+            })
         
-        print(f"  ✅ 图片处理完成: {len(downloaded_images)}/{len(image_urls)} 成功")
+        # 替换所有匹配的文本为img标签
+        for replacement in replacements:
+            content = content.replace(replacement['matched_text'], replacement['img_tag'], 1)
+        
+        print(f"  ✅ 图片处理完成: {len(downloaded_images)}/{len(image_matches)} 成功")
         return content
 
     def create_epub(self, book_info: Dict, output_path: str):
