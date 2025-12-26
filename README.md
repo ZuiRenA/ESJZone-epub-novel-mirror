@@ -29,3 +29,6 @@
 - 站点url
     - 可能为 `https://www.esjzone.cc/` 或 `https://www.esjzone.me/`。请确保bookListURL、bookURL、base_url的域名一致
 4. 命令行执行`python esj.py`。等待下载完成
+
+## txt 文本转 epub工具
+tool目录下有适用于无法下载epub情况，下载txt转换成epub的工具。支持了自定义封面，自动提取书名、作者，自动下载txt内image的功能。
